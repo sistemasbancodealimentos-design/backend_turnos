@@ -70,7 +70,7 @@ app.get('/api/stats', (req, res) => {
 
 // POST /api/turnos – register new turn
 app.post('/api/turnos', (req, res) => {
-  const { nombre, servicio, documento } = req.body;
+  const { nombre, institucion, servicio, documento } = req.body;
   if (!nombre?.trim() || !servicio)
     return res.status(400).json({ error: 'Nombre y servicio son obligatorios.' });
 
@@ -79,6 +79,7 @@ app.post('/api/turnos', (req, res) => {
     id:         db.counter++,
     numero:     db.counter - 1,
     nombre:     nombre.trim().toUpperCase(),
+    institucion: institucion.trim().toUpperCase(),
     servicio,
     documento:  documento?.trim() || null,
     estado:     'pendiente',
