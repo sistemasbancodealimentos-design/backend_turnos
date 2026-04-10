@@ -151,13 +151,6 @@ app.delete('/api/turnos/:id', (req, res) => {
   res.json({ message: 'Turno eliminado.' });
 });
 
-// POST /api/reset – wipe all turns
-app.post('/api/reset', (req, res) => {
-  saveDB({ turnos: [], counter: 1 });
-  broadcast(sseClients, 'reset', {});
-  res.json({ message: 'Sistema reiniciado correctamente.' });
-});
-
 // ── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log('');
