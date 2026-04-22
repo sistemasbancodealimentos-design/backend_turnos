@@ -1,34 +1,48 @@
-const express = require('express');
-const cors    = require('cors');
-const fs      = require('fs');
-const path    = require('path');
+const express  = require('express');
+const cors     = require('cors');
+const mongoose = require('mongoose');
 
-const app     = express();
-const PORT    = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'turnos.json');
+const app  = express();
+const PORT = process.env.PORT || 3000;
 
+// ── Conexión MongoDB ────────────────────────────────────────────────────────
+const MONGO_URI = process.env.MONGODB_URI;
+if (!MONGO_URI) {
+  console.error('ERROR: La variable de entorno MONGODB_URI no está definida.');
+  process.exit(1);
+}
+
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('  ✔ Conectado a MongoDB Atlas'))
+  .catch(err => { console.error('  ✘ Error conectando a MongoDB:', err); process.exit(1); });
+
+// ── Schema y Model ──────────────────────────────────────────────────────────
+const turnoSchema = new mongoose.Schema({
+  numero:      { type: Number },
+  nombre:      { type: String, required: true },
+  institucion: { type: String, default: '' },
+  servicio:    { type: String, required: true },
+  documento:   { type: String, default: null },
+  estado:      { type: String, enum: ['pendiente', 'llamado', 'atendido', 'saltado'], default: 'pendiente' },
+  creadoEn:    { type: Date, default: Date.now },
+  llamadoEn:   { type: Date, default: null },
+  atendidoEn:  { type: Date, default: null },
+}, { versionKey: false });
+
+const Turno = mongoose.model('Turno', turnoSchema);
+
+// ── Middleware ──────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
-app.use(express.static(__dirname)); // serve the HTML files at /
+app.use(express.static(__dirname));
 
-// ── DB helpers ─────────────────────────────────────────────────────────────
-function loadDB() {
-  if (!fs.existsSync(DB_FILE)) {
-    const init = { turnos: [], counter: 1 };
-    fs.writeFileSync(DB_FILE, JSON.stringify(init, null, 2));
-    return init;
-  }
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-}
-function saveDB(db) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-}
+// ── Helpers ─────────────────────────────────────────────────────────────────
 function broadcast(clients, event, data) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   clients.forEach(c => c.write(payload));
 }
 
-// ── SSE for real-time updates ───────────────────────────────────────────────
+// ── SSE ──────────────────────────────────────────────────────────────────────
 const sseClients = [];
 
 app.get('/api/events', (req, res) => {
@@ -36,7 +50,6 @@ app.get('/api/events', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection',    'keep-alive');
   res.flushHeaders();
-  // Send a heartbeat comment every 25 s to keep the connection alive
   const hb = setInterval(() => res.write(': heartbeat\n\n'), 25000);
   sseClients.push(res);
   req.on('close', () => {
@@ -46,112 +59,122 @@ app.get('/api/events', (req, res) => {
   });
 });
 
-// ── Routes ──────────────────────────────────────────────────────────────────
+// ── Rutas ────────────────────────────────────────────────────────────────────
 
-// GET  /api/turnos  – list all turns (optional ?estado=pendiente)
-app.get('/api/turnos', (req, res) => {
-  const db = loadDB();
-  const { estado } = req.query;
-  const turnos = estado ? db.turnos.filter(t => t.estado === estado) : db.turnos;
-  res.json(turnos);
+// GET /api/turnos – listar todos (opcional ?estado=pendiente)
+app.get('/api/turnos', async (req, res) => {
+  try {
+    const filter = req.query.estado ? { estado: req.query.estado } : {};
+    const turnos = await Turno.find(filter).sort({ creadoEn: 1 });
+    res.json(turnos);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET  /api/stats
-app.get('/api/stats', (req, res) => {
-  const db = loadDB();
-  res.json({
-    total:      db.turnos.length,
-    pendientes: db.turnos.filter(t => t.estado === 'pendiente').length,
-    llamados:   db.turnos.filter(t => t.estado === 'llamado').length,
-    atendidos:  db.turnos.filter(t => t.estado === 'atendido').length,
-    saltados:   db.turnos.filter(t => t.estado === 'saltado').length,
-  });
+// GET /api/stats
+app.get('/api/stats', async (req, res) => {
+  try {
+    const [total, pendientes, llamados, atendidos, saltados] = await Promise.all([
+      Turno.countDocuments(),
+      Turno.countDocuments({ estado: 'pendiente' }),
+      Turno.countDocuments({ estado: 'llamado' }),
+      Turno.countDocuments({ estado: 'atendido' }),
+      Turno.countDocuments({ estado: 'saltado' }),
+    ]);
+    res.json({ total, pendientes, llamados, atendidos, saltados });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/turnos – register new turn
-app.post('/api/turnos', (req, res) => {
-  const { nombre, institucion, servicio, documento } = req.body;
-  if (!nombre?.trim() || !servicio)
-    return res.status(400).json({ error: 'Nombre y servicio son obligatorios.' });
+// POST /api/turnos – registrar nuevo turno
+app.post('/api/turnos', async (req, res) => {
+  try {
+    const { nombre, institucion, servicio, documento } = req.body;
+    if (!nombre?.trim() || !servicio)
+      return res.status(400).json({ error: 'Nombre y servicio son obligatorios.' });
 
-  const db = loadDB();
-  const turno = {
-    id:         db.counter++,
-    numero:     db.counter - 1,
-    nombre:     nombre.trim().toUpperCase(),
-    institucion: institucion.trim().toUpperCase(),
-    servicio,
-    documento:  documento?.trim() || null,
-    estado:     'pendiente',
-    creadoEn:   new Date().toISOString(),
-    llamadoEn:  null,
-    atendidoEn: null,
-  };
-  db.turnos.push(turno);
-  saveDB(db);
-  broadcast(sseClients, 'nuevo', turno);
-  res.status(201).json(turno);
+    // Calcular el siguiente número correlativo
+    const ultimo = await Turno.findOne().sort({ numero: -1 });
+    const numero = (ultimo?.numero ?? 0) + 1;
+
+    const turno = await Turno.create({
+      numero,
+      nombre:      nombre.trim().toUpperCase(),
+      institucion: (institucion ?? '').trim().toUpperCase(),
+      servicio,
+      documento:   documento?.trim() || null,
+    });
+
+    broadcast(sseClients, 'nuevo', turno);
+    res.status(201).json(turno);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/siguiente – call next pending turn
-app.post('/api/siguiente', (req, res) => {
-  const db = loadDB();
-  const siguiente = db.turnos.find(t => t.estado === 'pendiente');
-  if (!siguiente) return res.status(404).json({ error: 'No hay turnos pendientes.' });
-  siguiente.estado    = 'llamado';
-  siguiente.llamadoEn = new Date().toISOString();
-  saveDB(db);
-  broadcast(sseClients, 'llamado', siguiente);
-  res.json(siguiente);
+// POST /api/siguiente – llamar siguiente turno pendiente
+app.post('/api/siguiente', async (req, res) => {
+  try {
+    const turno = await Turno.findOneAndUpdate(
+      { estado: 'pendiente' },
+      { estado: 'llamado', llamadoEn: new Date() },
+      { sort: { numero: 1 }, new: true }
+    );
+    if (!turno) return res.status(404).json({ error: 'No hay turnos pendientes.' });
+    broadcast(sseClients, 'llamado', turno);
+    res.json(turno);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/turnos/:id/llamar – call a specific turn
-app.post('/api/turnos/:id/llamar', (req, res) => {
-  const db = loadDB();
-  const turno = db.turnos.find(t => t.id === +req.params.id);
-  if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
-  turno.estado    = 'llamado';
-  turno.llamadoEn = new Date().toISOString();
-  saveDB(db);
-  broadcast(sseClients, 'llamado', turno);
-  res.json(turno);
+// POST /api/turnos/:id/llamar – llamar turno específico
+app.post('/api/turnos/:id/llamar', async (req, res) => {
+  try {
+    const turno = await Turno.findByIdAndUpdate(
+      req.params.id,
+      { estado: 'llamado', llamadoEn: new Date() },
+      { new: true }
+    );
+    if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
+    broadcast(sseClients, 'llamado', turno);
+    res.json(turno);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/turnos/:id/atender – mark as attended
-app.post('/api/turnos/:id/atender', (req, res) => {
-  const db = loadDB();
-  const turno = db.turnos.find(t => t.id === +req.params.id);
-  if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
-  turno.estado      = 'atendido';
-  turno.atendidoEn  = new Date().toISOString();
-  saveDB(db);
-  broadcast(sseClients, 'atendido', turno);
-  res.json(turno);
+// POST /api/turnos/:id/atender – marcar como atendido
+app.post('/api/turnos/:id/atender', async (req, res) => {
+  try {
+    const turno = await Turno.findByIdAndUpdate(
+      req.params.id,
+      { estado: 'atendido', atendidoEn: new Date() },
+      { new: true }
+    );
+    if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
+    broadcast(sseClients, 'atendido', turno);
+    res.json(turno);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/turnos/:id/saltar – skip a turn
-app.post('/api/turnos/:id/saltar', (req, res) => {
-  const db = loadDB();
-  const turno = db.turnos.find(t => t.id === +req.params.id);
-  if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
-  turno.estado = 'saltado';
-  saveDB(db);
-  broadcast(sseClients, 'saltado', turno);
-  res.json(turno);
+// POST /api/turnos/:id/saltar – saltar turno
+app.post('/api/turnos/:id/saltar', async (req, res) => {
+  try {
+    const turno = await Turno.findByIdAndUpdate(
+      req.params.id,
+      { estado: 'saltado' },
+      { new: true }
+    );
+    if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
+    broadcast(sseClients, 'saltado', turno);
+    res.json(turno);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // DELETE /api/turnos/:id
-app.delete('/api/turnos/:id', (req, res) => {
-  const db = loadDB();
-  const i = db.turnos.findIndex(t => t.id === +req.params.id);
-  if (i === -1) return res.status(404).json({ error: 'Turno no encontrado.' });
-  db.turnos.splice(i, 1);
-  saveDB(db);
-  broadcast(sseClients, 'eliminado', { id: +req.params.id });
-  res.json({ message: 'Turno eliminado.' });
+app.delete('/api/turnos/:id', async (req, res) => {
+  try {
+    const turno = await Turno.findByIdAndDelete(req.params.id);
+    if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
+    broadcast(sseClients, 'eliminado', { id: req.params.id });
+    res.json({ message: 'Turno eliminado.' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Start ───────────────────────────────────────────────────────────────────
+// ── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log('');
   console.log('  ╔══════════════════════════════════════════╗');
