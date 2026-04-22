@@ -3,32 +3,28 @@ const cors     = require('cors');
 const mongoose = require('mongoose');
 
 const app  = express();
-// Render asigna automáticamente un puerto; process.env.PORT lo captura correctamente
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Servidor en puerto ${PORT}`);
-});
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 
 // ── Conexión MongoDB ────────────────────────────────────────────────────────
-// IMPORTANTE: Asegúrate de configurar MONGODB_URI en las variables de entorno de Render
 const MONGO_URI = process.env.MONGODB_URI;
 
 if (!MONGO_URI) {
   console.error('❌ ERROR: La variable de entorno MONGODB_URI no está definida.');
-  console.error('Configúrala en Render > Dashboard > Environment.');
 } else {
+  // Configuración de conexión optimizada para evitar timeouts
   mongoose.connect(MONGO_URI, {
-    serverSelectionTimeoutMS: 5000, // Falla rápido si no conecta (5s) en lugar de esperar 30s
-    socketTimeoutMS: 45000,         // Mantiene la conexión viva
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
   })
   .then(() => console.log('✅ Conectado exitosamente a MongoDB Atlas'))
   .catch(err => {
     console.error('❌ Error crítico conectando a MongoDB:', err.message);
   });
+}
 
 // ── Schema y Model ──────────────────────────────────────────────────────────
 const turnoSchema = new mongoose.Schema({
@@ -47,14 +43,14 @@ const Turno = mongoose.model('Turno', turnoSchema);
 
 // ── Manejo de Eventos (SSE) ──────────────────────────────────────────────────
 let sseClients = [];
-function broadcast(clients, type, data) {
+function broadcast(type, data) {
   const payload = JSON.stringify({ type, data });
-  clients.forEach(res => res.write(`data: ${payload}\n\n`));
+  sseClients.forEach(res => res.write(`data: ${payload}\n\n`));
 }
 
 // ── Rutas API ───────────────────────────────────────────────────────────────
 
-// Endpoint SSE para actualizaciones en tiempo real
+// Endpoint SSE
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -66,7 +62,7 @@ app.get('/events', (req, res) => {
   });
 });
 
-// GET /api/turnos – obtener todos
+// GET /api/turnos
 app.get('/api/turnos', async (req, res) => {
   try {
     const turnos = await Turno.find().sort({ creadoEn: 1 });
@@ -74,19 +70,19 @@ app.get('/api/turnos', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/turnos – crear nuevo turno
+// POST /api/turnos – Crear nuevo
 app.post('/api/turnos', async (req, res) => {
   try {
     const ultimoTurno = await Turno.findOne().sort({ numero: -1 });
     const nuevoNumero = ultimoTurno && ultimoTurno.numero ? ultimoTurno.numero + 1 : 1;
     const nuevoTurno = new Turno({ ...req.body, numero: nuevoNumero });
     await nuevoTurno.save();
-    broadcast(sseClients, 'nuevo', nuevoTurno);
+    broadcast('nuevo', nuevoTurno);
     res.status(201).json(nuevoTurno);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/turnos/:id/llamar – llamar turno
+// POST /api/turnos/:id/llamar
 app.post('/api/turnos/:id/llamar', async (req, res) => {
   try {
     const turno = await Turno.findByIdAndUpdate(
@@ -95,12 +91,12 @@ app.post('/api/turnos/:id/llamar', async (req, res) => {
       { new: true }
     );
     if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
-    broadcast(sseClients, 'llamado', turno);
+    broadcast('llamado', turno);
     res.json(turno);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/turnos/:id/atender – atender turno
+// POST /api/turnos/:id/atender
 app.post('/api/turnos/:id/atender', async (req, res) => {
   try {
     const turno = await Turno.findByIdAndUpdate(
@@ -109,32 +105,8 @@ app.post('/api/turnos/:id/atender', async (req, res) => {
       { new: true }
     );
     if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
-    broadcast(sseClients, 'atendido', turno);
+    broadcast('atendido', turno);
     res.json(turno);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// POST /api/turnos/:id/saltar – saltar turno
-app.post('/api/turnos/:id/saltar', async (req, res) => {
-  try {
-    const turno = await Turno.findByIdAndUpdate(
-      req.params.id,
-      { estado: 'saltado' },
-      { new: true }
-    );
-    if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
-    broadcast(sseClients, 'saltado', turno);
-    res.json(turno);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// DELETE /api/turnos/:id – eliminar un turno
-app.delete('/api/turnos/:id', async (req, res) => {
-  try {
-    const turno = await Turno.findByIdAndDelete(req.params.id);
-    if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
-    broadcast(sseClients, 'eliminado', { id: req.params.id });
-    res.json({ message: 'Turno eliminado.' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -143,10 +115,10 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
 });
 
-// Manejo de errores para evitar que el proceso se quede colgado
+// Manejo de error de puerto para Render
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
-    console.error('❌ El puerto ya está en uso. Reintentando...');
+    console.error('❌ Puerto en uso, reintentando...');
     setTimeout(() => {
       server.close();
       server.listen(PORT);
