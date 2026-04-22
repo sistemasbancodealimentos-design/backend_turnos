@@ -5,6 +5,9 @@ const mongoose = require('mongoose');
 const app  = express();
 // Render asigna automáticamente un puerto; process.env.PORT lo captura correctamente
 const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Servidor en puerto ${PORT}`);
+});
 
 // ── Middleware ──────────────────────────────────────────────────────────────
 app.use(cors());
