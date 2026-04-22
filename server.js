@@ -137,6 +137,17 @@ app.delete('/api/turnos/:id', async (req, res) => {
 });
 
 // ── Iniciar Servidor ────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
+});
+
+// Manejo de errores para evitar que el proceso se quede colgado
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error('❌ El puerto ya está en uso. Reintentando...');
+    setTimeout(() => {
+      server.close();
+      server.listen(PORT);
+    }, 1000);
+  }
 });
