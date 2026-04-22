@@ -6,15 +6,17 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 // ── Conexión MongoDB ────────────────────────────────────────────────────────
+// IMPORTANTE: En Render, usaremos la variable de entorno MONGODB_URI
 const MONGO_URI = process.env.MONGODB_URI;
+
 if (!MONGO_URI) {
   console.error('ERROR: La variable de entorno MONGODB_URI no está definida.');
-  process.exit(1);
+  // No cerramos el proceso inmediatamente para que Render no entre en un loop de reinicio infinito si olvidas la variable
+} else {
+  mongoose.connect(MONGO_URI)
+    .then(() => console.log('  ✔ Conectado a MongoDB Atlas'))
+    .catch(err => console.error('  ✘ Error conectando a MongoDB:', err));
 }
-
-mongoose.connect(MONGO_URI)
-  .then(() => console.log('  ✔ Conectado a MongoDB Atlas'))
-  .catch(err => { console.error('  ✘ Error conectando a MongoDB:', err); process.exit(1); });
 
 // ── Schema y Model ──────────────────────────────────────────────────────────
 const turnoSchema = new mongoose.Schema({
