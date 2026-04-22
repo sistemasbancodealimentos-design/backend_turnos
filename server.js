@@ -3,19 +3,26 @@ const cors     = require('cors');
 const mongoose = require('mongoose');
 
 const app  = express();
+// Render asigna automáticamente un puerto; process.env.PORT lo captura correctamente
 const PORT = process.env.PORT || 3000;
 
+// ── Middleware ──────────────────────────────────────────────────────────────
+app.use(cors());
+app.use(express.json());
+
 // ── Conexión MongoDB ────────────────────────────────────────────────────────
-// IMPORTANTE: En Render, usaremos la variable de entorno MONGODB_URI
+// IMPORTANTE: Asegúrate de configurar MONGODB_URI en las variables de entorno de Render
 const MONGO_URI = process.env.MONGODB_URI;
 
 if (!MONGO_URI) {
-  console.error('ERROR: La variable de entorno MONGODB_URI no está definida.');
-  // No cerramos el proceso inmediatamente para que Render no entre en un loop de reinicio infinito si olvidas la variable
+  console.error('❌ ERROR: La variable de entorno MONGODB_URI no está definida.');
+  console.error('Configúrala en Render > Dashboard > Environment.');
 } else {
   mongoose.connect(MONGO_URI)
-    .then(() => console.log('  ✔ Conectado a MongoDB Atlas'))
-    .catch(err => console.error('  ✘ Error conectando a MongoDB:', err));
+    .then(() => console.log('✅ Conectado exitosamente a MongoDB Atlas'))
+    .catch(err => {
+      console.error('❌ Error crítico conectando a MongoDB:', err.message);
+    });
 }
 
 // ── Schema y Model ──────────────────────────────────────────────────────────
@@ -33,98 +40,48 @@ const turnoSchema = new mongoose.Schema({
 
 const Turno = mongoose.model('Turno', turnoSchema);
 
-// ── Middleware ──────────────────────────────────────────────────────────────
-app.use(cors());
-app.use(express.json());
-app.use(express.static(__dirname));
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-function broadcast(clients, event, data) {
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  clients.forEach(c => c.write(payload));
+// ── Manejo de Eventos (SSE) ──────────────────────────────────────────────────
+let sseClients = [];
+function broadcast(clients, type, data) {
+  const payload = JSON.stringify({ type, data });
+  clients.forEach(res => res.write(`data: ${payload}\n\n`));
 }
 
-// ── SSE ──────────────────────────────────────────────────────────────────────
-const sseClients = [];
+// ── Rutas API ───────────────────────────────────────────────────────────────
 
-app.get('/api/events', (req, res) => {
-  res.setHeader('Content-Type',  'text/event-stream');
+// Endpoint SSE para actualizaciones en tiempo real
+app.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection',    'keep-alive');
+  res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
-  const hb = setInterval(() => res.write(': heartbeat\n\n'), 25000);
   sseClients.push(res);
   req.on('close', () => {
-    clearInterval(hb);
-    const i = sseClients.indexOf(res);
-    if (i !== -1) sseClients.splice(i, 1);
+    sseClients = sseClients.filter(c => c !== res);
   });
 });
 
-// ── Rutas ────────────────────────────────────────────────────────────────────
-
-// GET /api/turnos – listar todos (opcional ?estado=pendiente)
+// GET /api/turnos – obtener todos
 app.get('/api/turnos', async (req, res) => {
   try {
-    const filter = req.query.estado ? { estado: req.query.estado } : {};
-    const turnos = await Turno.find(filter).sort({ creadoEn: 1 });
+    const turnos = await Turno.find().sort({ creadoEn: 1 });
     res.json(turnos);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /api/stats
-app.get('/api/stats', async (req, res) => {
-  try {
-    const [total, pendientes, llamados, atendidos, saltados] = await Promise.all([
-      Turno.countDocuments(),
-      Turno.countDocuments({ estado: 'pendiente' }),
-      Turno.countDocuments({ estado: 'llamado' }),
-      Turno.countDocuments({ estado: 'atendido' }),
-      Turno.countDocuments({ estado: 'saltado' }),
-    ]);
-    res.json({ total, pendientes, llamados, atendidos, saltados });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// POST /api/turnos – registrar nuevo turno
+// POST /api/turnos – crear nuevo turno
 app.post('/api/turnos', async (req, res) => {
   try {
-    const { nombre, institucion, servicio, documento } = req.body;
-    if (!nombre?.trim() || !servicio)
-      return res.status(400).json({ error: 'Nombre y servicio son obligatorios.' });
-
-    // Calcular el siguiente número correlativo
-    const ultimo = await Turno.findOne().sort({ numero: -1 });
-    const numero = (ultimo?.numero ?? 0) + 1;
-
-    const turno = await Turno.create({
-      numero,
-      nombre:      nombre.trim().toUpperCase(),
-      institucion: (institucion ?? '').trim().toUpperCase(),
-      servicio,
-      documento:   documento?.trim() || null,
-    });
-
-    broadcast(sseClients, 'nuevo', turno);
-    res.status(201).json(turno);
+    const ultimoTurno = await Turno.findOne().sort({ numero: -1 });
+    const nuevoNumero = ultimoTurno && ultimoTurno.numero ? ultimoTurno.numero + 1 : 1;
+    const nuevoTurno = new Turno({ ...req.body, numero: nuevoNumero });
+    await nuevoTurno.save();
+    broadcast(sseClients, 'nuevo', nuevoTurno);
+    res.status(201).json(nuevoTurno);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/siguiente – llamar siguiente turno pendiente
-app.post('/api/siguiente', async (req, res) => {
-  try {
-    const turno = await Turno.findOneAndUpdate(
-      { estado: 'pendiente' },
-      { estado: 'llamado', llamadoEn: new Date() },
-      { sort: { numero: 1 }, new: true }
-    );
-    if (!turno) return res.status(404).json({ error: 'No hay turnos pendientes.' });
-    broadcast(sseClients, 'llamado', turno);
-    res.json(turno);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// POST /api/turnos/:id/llamar – llamar turno específico
+// POST /api/turnos/:id/llamar – llamar turno
 app.post('/api/turnos/:id/llamar', async (req, res) => {
   try {
     const turno = await Turno.findByIdAndUpdate(
@@ -138,7 +95,7 @@ app.post('/api/turnos/:id/llamar', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/turnos/:id/atender – marcar como atendido
+// POST /api/turnos/:id/atender – atender turno
 app.post('/api/turnos/:id/atender', async (req, res) => {
   try {
     const turno = await Turno.findByIdAndUpdate(
@@ -166,7 +123,7 @@ app.post('/api/turnos/:id/saltar', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// DELETE /api/turnos/:id
+// DELETE /api/turnos/:id – eliminar un turno
 app.delete('/api/turnos/:id', async (req, res) => {
   try {
     const turno = await Turno.findByIdAndDelete(req.params.id);
@@ -176,12 +133,7 @@ app.delete('/api/turnos/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Start ────────────────────────────────────────────────────────────────────
+// ── Iniciar Servidor ────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log('');
-  console.log('  ╔══════════════════════════════════════════╗');
-  console.log('  ║   FUBAM – Sistema de Gestión de Turnos   ║');
-  console.log(`  ║   Servidor en http://localhost:${PORT}       ║`);
-  console.log('  ╚══════════════════════════════════════════╝');
-  console.log('');
+  console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
 });
