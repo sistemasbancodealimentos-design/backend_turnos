@@ -21,12 +21,14 @@ if (!MONGO_URI) {
   console.error('❌ ERROR: La variable de entorno MONGODB_URI no está definida.');
   console.error('Configúrala en Render > Dashboard > Environment.');
 } else {
-  mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ Conectado exitosamente a MongoDB Atlas'))
-    .catch(err => {
-      console.error('❌ Error crítico conectando a MongoDB:', err.message);
-    });
-}
+  mongoose.connect(MONGO_URI, {
+    serverSelectionTimeoutMS: 5000, // Falla rápido si no conecta (5s) en lugar de esperar 30s
+    socketTimeoutMS: 45000,         // Mantiene la conexión viva
+  })
+  .then(() => console.log('✅ Conectado exitosamente a MongoDB Atlas'))
+  .catch(err => {
+    console.error('❌ Error crítico conectando a MongoDB:', err.message);
+  });
 
 // ── Schema y Model ──────────────────────────────────────────────────────────
 const turnoSchema = new mongoose.Schema({
