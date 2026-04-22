@@ -1,6 +1,7 @@
 const express  = require('express');
 const cors     = require('cors');
 const mongoose = require('mongoose');
+require('dotenv').config();
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -44,8 +45,23 @@ const Turno = mongoose.model('Turno', turnoSchema);
 // ── Manejo de Eventos (SSE) ──────────────────────────────────────────────────
 let sseClients = [];
 function broadcast(type, data) {
-  const payload = JSON.stringify({ type, data });
-  sseClients.forEach(res => res.write(`data: ${payload}\n\n`));
+  const payload = JSON.stringify(data);
+  sseClients.forEach((res) => {
+    res.write(`event: ${type}\n`);
+    res.write(`data: ${payload}\n\n`);
+  });
+}
+
+async function buildStats() {
+  const [total, pendientes, llamados, atendidos, saltados] = await Promise.all([
+    Turno.countDocuments(),
+    Turno.countDocuments({ estado: 'pendiente' }),
+    Turno.countDocuments({ estado: 'llamado' }),
+    Turno.countDocuments({ estado: 'atendido' }),
+    Turno.countDocuments({ estado: 'saltado' }),
+  ]);
+
+  return { total, pendientes, llamados, atendidos, saltados };
 }
 
 // ── Rutas API ───────────────────────────────────────────────────────────────
@@ -56,6 +72,20 @@ app.get('/events', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
+  res.write(': connected\n\n');
+  sseClients.push(res);
+  req.on('close', () => {
+    sseClients = sseClients.filter(c => c !== res);
+  });
+});
+
+// Alias usado por los frontends
+app.get('/api/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  res.write(': connected\n\n');
   sseClients.push(res);
   req.on('close', () => {
     sseClients = sseClients.filter(c => c !== res);
@@ -70,6 +100,16 @@ app.get('/api/turnos', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// GET /api/stats
+app.get('/api/stats', async (req, res) => {
+  try {
+    const stats = await buildStats();
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/turnos – Crear nuevo
 app.post('/api/turnos', async (req, res) => {
   try {
@@ -80,6 +120,26 @@ app.post('/api/turnos', async (req, res) => {
     broadcast('nuevo', nuevoTurno);
     res.status(201).json(nuevoTurno);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/siguiente
+app.post('/api/siguiente', async (req, res) => {
+  try {
+    const siguiente = await Turno.findOneAndUpdate(
+      { estado: 'pendiente' },
+      { estado: 'llamado', llamadoEn: new Date() },
+      { sort: { creadoEn: 1 }, new: true }
+    );
+
+    if (!siguiente) {
+      return res.status(404).json({ error: 'No hay turnos pendientes.' });
+    }
+
+    broadcast('llamado', siguiente);
+    res.json(siguiente);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/turnos/:id/llamar
@@ -108,6 +168,22 @@ app.post('/api/turnos/:id/atender', async (req, res) => {
     broadcast('atendido', turno);
     res.json(turno);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/turnos/:id/saltar
+app.post('/api/turnos/:id/saltar', async (req, res) => {
+  try {
+    const turno = await Turno.findByIdAndUpdate(
+      req.params.id,
+      { estado: 'saltado', atendidoEn: new Date() },
+      { new: true }
+    );
+    if (!turno) return res.status(404).json({ error: 'Turno no encontrado.' });
+    broadcast('saltado', turno);
+    res.json(turno);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Iniciar Servidor ────────────────────────────────────────────────────────
