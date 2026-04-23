@@ -1,9 +1,9 @@
-const express  = require('express');
-const cors     = require('cors');
+const express = require('express');
+const cors = require('cors');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ── Middleware ──────────────────────────────────────────────────────────────
@@ -22,23 +22,23 @@ if (!MONGO_URI) {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
   })
-  .then(() => console.log('✅ Conectado exitosamente a MongoDB Atlas'))
-  .catch(err => {
-    console.error('❌ Error crítico conectando a MongoDB:', err.message);
-  });
+    .then(() => console.log('✅ Conectado exitosamente a MongoDB Atlas'))
+    .catch(err => {
+      console.error('❌ Error crítico conectando a MongoDB:', err.message);
+    });
 }
 
 // ── Schema y Model ──────────────────────────────────────────────────────────
 const turnoSchema = new mongoose.Schema({
-  numero:      { type: Number },
-  nombre:      { type: String, required: true },
+  numero: { type: Number },
+  nombre: { type: String, required: true },
   institucion: { type: String, default: '' },
-  servicio:    { type: String, required: true },
-  documento:   { type: String, default: null },
-  estado:      { type: String, enum: ['pendiente', 'llamado', 'atendido', 'saltado'], default: 'pendiente' },
-  creadoEn:    { type: Date, default: Date.now },
-  llamadoEn:   { type: Date, default: null },
-  atendidoEn:  { type: Date, default: null },
+  servicio: { type: String, required: true },
+  documento: { type: String, default: null },
+  estado: { type: String, enum: ['pendiente', 'llamado', 'atendido', 'saltado'], default: 'pendiente' },
+  creadoEn: { type: Date, default: Date.now },
+  llamadoEn: { type: Date, default: null },
+  atendidoEn: { type: Date, default: null },
 }, { versionKey: false });
 
 const Turno = mongoose.model('Turno', turnoSchema);
@@ -112,15 +112,65 @@ app.get('/api/stats', async (req, res) => {
 });
 
 // POST /api/turnos – Crear nuevo
+// POST /api/turnos - Registro con reinicio diario
 app.post('/api/turnos', async (req, res) => {
   try {
-    const ultimoTurno = await Turno.findOne().sort({ numero: -1 });
-    const nuevoNumero = ultimoTurno && ultimoTurno.numero ? ultimoTurno.numero + 1 : 1;
-    const nuevoTurno = new Turno({ ...req.body, numero: nuevoNumero });
+    const { nombre, institucion, servicio, documento } = req.body;
+
+    // 1. Definir el inicio y fin del día actual
+    const inicioDia = new Date();
+    inicioDia.setHours(0, 0, 0, 0);
+
+    const finDia = new Date();
+    finDia.setHours(23, 59, 59, 999);
+
+    // 2. Contar turnos de esta institución creados hoy
+    const conteoHoy = await Turno.countDocuments({
+      institucion: institucion,
+      createdAt: { $gte: inicioDia, $lte: finDia }
+    });
+
+    // 3. El nuevo número es el conteo + 1
+    const nuevoNumero = conteoHoy + 1;
+
+    const nuevoTurno = new Turno({
+      numero: nuevoNumero,
+      nombre,
+      institucion,
+      servicio,
+      documento,
+      estado: 'pendiente'
+    });
+
     await nuevoTurno.save();
-    broadcast('nuevo', nuevoTurno);
+
+    // Opcional: Emitir por socket si usas broadcast
+    if (typeof broadcast === 'function') broadcast('nuevo', nuevoTurno);
+
     res.status(201).json(nuevoTurno);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// NUEVA RUTA: Endpoint para Reportes
+app.get('/api/reportes', async (req, res) => {
+  try {
+    const { inicio, fin } = req.query;
+    const filtro = {};
+
+    if (inicio && fin) {
+      filtro.createdAt = {
+        $gte: new Date(inicio + "T00:00:00"),
+        $lte: new Date(fin + "T23:59:59")
+      };
+    }
+
+    const turnos = await Turno.find(filtro).sort({ createdAt: -1 });
+    res.json(turnos);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/siguiente
