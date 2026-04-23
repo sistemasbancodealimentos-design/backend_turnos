@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 3000;
 // ── Middleware ──────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
+app.use(express.static('.'));
 
 // ── Conexión MongoDB ────────────────────────────────────────────────────────
 const MONGO_URI = process.env.MONGODB_URI;
